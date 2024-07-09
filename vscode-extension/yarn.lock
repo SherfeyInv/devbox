@@ -98,10 +98,10 @@
   resolved "https://registry.npmjs.org/@types/node/-/node-18.11.0.tgz"
   integrity sha512-IOXCvVRToe7e0ny7HpT/X9Rb2RYtElG1a+VshjwT00HxrM2dWBApHQoqsI6WiY7Q03vdf2bCrIGzVrkF/5t10w==
 
-"@types/node@16.18.97":
-  version "16.18.97"
-  resolved "https://registry.yarnpkg.com/@types/node/-/node-16.18.97.tgz#d7926a8030f0d714d555b4550c0cc7731495cfe5"
-  integrity sha512-4muilE1Lbfn57unR+/nT9AFjWk0MtWi5muwCEJqnOvfRQDbSfLCUdN7vCIg8TYuaANfhLOV85ve+FNpiUsbSRg==
+"@types/node@16.18.99":
+  version "16.18.99"
+  resolved "https://registry.yarnpkg.com/@types/node/-/node-16.18.99.tgz#6600ee92acb332e5409b22166041c27afce8bb6e"
+  integrity sha512-X2Yc+NQaPXDuaR32UmFrTr3OXWaht756A6sJw56o4dehkySBZ0NWH30CCRviuC0KFwTDW/NTjrtbFHhYcHkd6g==
 
 "@types/semver@^7.3.12":
   version "7.3.12"
