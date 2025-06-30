@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"strings"
 
-	"go.jetpack.io/devbox/internal/redact"
+	"go.jetify.com/devbox/internal/redact"
 )
 
 // Flake reference types supported by this package.
@@ -462,6 +462,22 @@ func (r Ref) String() string {
 		return url.String()
 	default:
 		return ""
+	}
+}
+
+// IsNixpkgs reports whether the flake reference looks like a nixpkgs flake.
+//
+// While there are many ways to specify this input, devbox always uses
+// github:NixOS/nixpkgs/<hash> as the URL. If the user wishes to reference nixpkgs
+// themselves, this function may not return true.
+func (r Ref) IsNixpkgs() bool {
+	switch r.Type {
+	case TypeGitHub:
+		return r.Owner == "NixOS" && r.Repo == "nixpkgs"
+	case TypeIndirect:
+		return r.ID == "nixpkgs"
+	default:
+		return false
 	}
 }
 
