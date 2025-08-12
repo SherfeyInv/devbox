@@ -160,7 +160,7 @@
   "dependencies": {
     "@types/node": "16.x",
     "form-data": "^4.0.4",
-    "node-fetch": "^2",
+    "node-fetch": "^3.3.2",
     "which": "^3.0.0"
   }
 }
