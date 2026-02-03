@@ -1,2 +1,3 @@
 temporalio==0.1b4
 cython
+protobuf>=6.33.5 # not directly required, pinned by Snyk to avoid a vulnerability
