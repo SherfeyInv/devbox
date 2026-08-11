@@ -32,7 +32,6 @@ import (
 	"go.jetify.com/devbox/internal/devbox/envpath"
 	"go.jetify.com/devbox/internal/devbox/generate"
 	"go.jetify.com/devbox/internal/devconfig"
-	"go.jetify.com/devbox/internal/devconfig/configfile"
 	"go.jetify.com/devbox/internal/devpkg"
 	"go.jetify.com/devbox/internal/devpkg/pkgtype"
 	"go.jetify.com/devbox/internal/envir"
@@ -316,6 +315,15 @@ func (d *Devbox) RunScript(ctx context.Context, envOpts devopt.EnvOptions, cmdNa
 		// which we don't want. So, one solution is to write the entire command and its arguments into the
 		// file itself, but that may not be great if the variables contain sensitive information. Instead,
 		// we save the entire command (with args) into the DEVBOX_RUN_CMD var, and then the script evals it.
+		//
+		// If cmdName is an alias defined in devbox.json, expand it to its command
+		// first, mirroring how a shell expands an alias that appears in command
+		// position. This lets `devbox run <alias>` work without an interactive
+		// shell (i.e. even when the init hook hasn't defined the alias).
+		runCmd := cmdName
+		if alias, ok := d.cfg.Aliases()[cmdName]; ok {
+			runCmd = alias
+		}
 		scriptBody, err := shellgen.ScriptBody(d, "eval $DEVBOX_RUN_CMD\n")
 		if err != nil {
 			return err
@@ -326,7 +334,7 @@ func (d *Devbox) RunScript(ctx context.Context, envOpts devopt.EnvOptions, cmdNa
 		}
 		script := shellgen.ScriptPath(d.ProjectDir(), arbitraryCmdFilename)
 		cmdWithArgs = []string{strconv.Quote(script)}
-		env["DEVBOX_RUN_CMD"] = strings.Join(append([]string{cmdName}, cmdArgs...), " ")
+		env["DEVBOX_RUN_CMD"] = strings.Join(append([]string{runCmd}, cmdArgs...), " ")
 	}
 
 	return nix.RunScript(d.projectDir, strings.Join(cmdWithArgs, " "), env)
@@ -373,9 +381,9 @@ func (d *Devbox) EnvExports(ctx context.Context, opts devopt.EnvExportsOpts) (st
 	// Use the appropriate export format based on shell type
 	var envStr string
 	if opts.ShellFormat == devopt.ShellFormatNushell {
-		envStr = exportifyNushell(envs)
+		envStr = exportifyNushell(d.stderr, envs)
 	} else {
-		envStr = exportify(envs)
+		envStr = exportify(d.stderr, envs)
 	}
 
 	if opts.RunHooks {
@@ -749,7 +757,7 @@ func (d *Devbox) computeEnv(
 	env["DEVBOX_PACKAGES_DIR"] = d.projectDir + "/" + nix.ProfilePath
 
 	// Include env variables in devbox.json
-	configEnv, err := d.configEnvs(ctx, env)
+	configEnv, err := d.configEnvs(env)
 	if err != nil {
 		return nil, err
 	}
@@ -987,36 +995,17 @@ func (d *Devbox) checkOldEnvrc() error {
 // allow env variables from outside the shell to be referenced so
 // no leaked variables are caused by this function.
 func (d *Devbox) configEnvs(
-	ctx context.Context,
 	existingEnv map[string]string,
 ) (map[string]string, error) {
 	defer debug.FunctionTimer().End()
 	env := map[string]string{}
-	if d.cfg.IsEnvsecEnabled() {
-		secrets, err := d.Secrets(ctx)
-		// TODO: replace this with error.Is check once envsec exports it.
-		if err != nil && !strings.Contains(err.Error(), "project not initialized") {
-			return nil, err
-		} else if err != nil {
-			ux.Fwarningf(
-				d.stderr,
-				"Ignoring env_from directive. jetify cloud secrets is not "+
-					"initialized. Run `devbox secrets init` to initialize it.\n",
-			)
-		} else {
-			cloudSecrets, err := secrets.List(ctx)
-			if err != nil {
-				ux.Fwarningf(
-					os.Stderr,
-					"Error reading secrets from jetify cloud: %s\n\n",
-					err,
-				)
-			} else {
-				for _, secret := range cloudSecrets {
-					env[secret.Name] = secret.Value
-				}
-			}
-		}
+	if d.cfg.IsJetifyCloudEnvFrom() {
+		ux.Fwarningf(
+			d.stderr,
+			"Ignoring env_from = %q. Jetify Cloud secrets are no longer "+
+				"supported by Devbox.\n",
+			d.cfg.Root.EnvFrom,
+		)
 	} else if d.cfg.Root.IsdotEnvEnabled() {
 		// if env_from points to a .env file, parse and add it
 		parsedEnvs, err := d.cfg.Root.ParseEnvsFromDotEnv()
@@ -1034,9 +1023,8 @@ func (d *Devbox) configEnvs(
 		}
 	} else if d.cfg.Root.EnvFrom != "" {
 		return nil, usererr.New(
-			"unknown env_from value: %s. Supported values are: \"%q\" or a path to a file ending in \".env\"",
+			"unknown env_from value: %s. It must be a path to a file ending in \".env\"",
 			d.cfg.Root.EnvFrom,
-			configfile.JetifyCloudEnvFromValue,
 		)
 	}
 	for k, v := range d.cfg.Env() {
