@@ -58,14 +58,14 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
         with:
           go-version-file: ./go.mod
       - name: Build devbox
         run: go build -o dist/devbox ./cmd/devbox
       - name: Upload devbox artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: devbox-${{ runner.os }}-${{ runner.arch }}
           path: ./dist/devbox
@@ -76,7 +76,7 @@ jobs:
     if: github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: crate-ci/typos@v1.16.26
 
   flake-test:
@@ -84,7 +84,7 @@ jobs:
     if: github.ref != 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Install devbox
         uses: jetify-com/devbox-install-action@jl/migrate-installer
         with:
@@ -104,7 +104,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install devbox
         uses: jetify-com/devbox-install-action@jl/migrate-installer
@@ -112,7 +112,7 @@ jobs:
           enable-cache: true
 
       - name: Mount golang cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cache/golangci-lint
@@ -133,11 +133,20 @@ jobs:
         # the devbox.json tests. We can require the other tests to complete before
         # merging, while keeping the others as an additional non-required signal
         run-project-tests: ["project-tests-only", "project-tests-off"]
-        # Run tests on:
-        # 1. the oldest supported nix version (Nixpkgs requires >= 2.18 as of 2026)
-        # 2. nix 2.19.2: version before nix profile changes
-        # 3. latest nix version (note, 2.20.1 introduced a new profile change)
-        nix-version: ["2.18.0", "2.19.2", "2.30.2"]
+        # The testscripts are bound by per-runner nix work (downloading package
+        # closures and evaluating flakes), which barely parallelizes within a
+        # single runner. We instead shard the scripts across multiple runners.
+        # The runner count here must match DEVBOX_TEST_SHARD_TOTAL below. The
+        # `test-result` job aggregates all shards into one required status check.
+        shard: [0, 1, 2]
+        # NOTE: this job used to run a `nix-version` matrix, but the
+        # devbox-install-action we now use to install Nix doesn't let us pin a
+        # specific Nix version. The matrix legs were therefore running identical
+        # duplicates (3x the jobs, 3x the flake surface, no extra coverage), so
+        # it was removed. Cross-version coverage is currently provided by the
+        # separate `test-nix-versions` job. Once the install action supports
+        # specifying a Nix version, re-add the matrix here and wire it into the
+        # "Install devbox" step.
         exclude:
           # Only runs tests on macos if explicitly requested, or on a schedule
           - os: "${{ (inputs.run-mac-tests || github.event.schedule != '') && 'dummy' || 'macos-latest' }}"
@@ -150,6 +159,10 @@ jobs:
       # But we allow overriding via inputs.example-debug
       DEVBOX_DEBUG: ${{ (matrix.run-project-tests == 'project-tests-off' || inputs.example-debug) && '1' || '0' }}
       DEVBOX_GOLANG_TEST_TIMEOUT: "${{ (github.ref == 'refs/heads/main' || inputs.run-mac-tests) && '1h' || '30m' }}"
+      # Shard the testscripts across runners. DEVBOX_TEST_SHARD_TOTAL must match
+      # the length of the `shard` matrix axis above.
+      DEVBOX_TEST_SHARD_INDEX: ${{ matrix.shard }}
+      DEVBOX_TEST_SHARD_TOTAL: 3
     steps:
       - name: clear directories to reduce disk usage
         # https://github.com/actions/runner-images/issues/2840#issuecomment-1284059930
@@ -157,9 +170,9 @@ jobs:
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf "$AGENT_TOOLSDIRECTORY"
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Mount golang cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cache/go-build
@@ -180,26 +193,36 @@ jobs:
           enable-cache: true
       - name: Setup Nix GitHub authentication
         run: |
-          # Setup github authentication to ensure Github's rate limits are not hit
-          # For macOS, we need to configure the system-wide nix.conf because the Nix daemon
-          # runs as a different user and doesn't read the user's ~/.config/nix/nix.conf
+          # Setup github authentication to ensure GitHub's API rate limits are not
+          # hit when Nix resolves `github:` flake refs (e.g. fetching the latest
+          # commit of nixpkgs-unstable). Anonymous requests are limited to 60/hr,
+          # which is quickly exhausted by the parallel test suite and surfaces as
+          # "unable to download '.../commits/...': HTTP error 403".
+          #
+          # `access-tokens` set via NIX_CONFIG or the user's ~/.config/nix/nix.conf
+          # is only honored when the invoking user is a trusted user. The Nix daemon
+          # (which can run as a different user) does not read the user config at all.
+          # The system-wide /etc/nix/nix.conf is always trusted and read by both the
+          # client and the daemon, so write the token there on every platform.
+          echo "Configuring system-wide Nix config (/etc/nix/nix.conf)"
+          sudo mkdir -p /etc/nix
+          if [ ! -f /etc/nix/nix.conf ]; then
+            echo "# Nix configuration" | sudo tee /etc/nix/nix.conf > /dev/null
+          fi
+          echo "access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}" | sudo tee -a /etc/nix/nix.conf > /dev/null
+
+          # Restart the Nix daemon so it picks up the new configuration.
           if [ "$RUNNER_OS" == "macOS" ]; then
-            echo "Configuring system-wide Nix config for macOS daemon"
-            # Ensure /etc/nix directory exists
-            if [ ! -d /etc/nix ]; then
-              sudo mkdir -p /etc/nix
-            fi
-            # Check if file exists, create it if not
-            if [ ! -f /etc/nix/nix.conf ]; then
-              echo "# Nix configuration" | sudo tee /etc/nix/nix.conf > /dev/null
-            fi
-            echo "access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}" | sudo tee -a /etc/nix/nix.conf
-            # Restart nix daemon to pick up the new configuration
             sudo launchctl stop org.nixos.nix-daemon || true
             sudo launchctl start org.nixos.nix-daemon || true
-            sleep 2  # Give daemon time to restart
+            sleep 2  # Give the daemon time to restart
+          elif systemctl list-unit-files nix-daemon.service >/dev/null 2>&1; then
+            # Only restart when the unit exists, and let a real restart failure
+            # fail the job rather than silently keeping the old config.
+            sudo systemctl restart nix-daemon
           fi
-          # For Linux and as a backup for macOS, also configure user config
+
+          # Also configure the user config as a backup for trusted-user setups.
           mkdir -p ~/.config/nix
           echo "access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}" > ~/.config/nix/nix.conf
       - name: Run fast tests
@@ -219,6 +242,26 @@ jobs:
         if:  matrix.run-project-tests == 'project-tests-only'
         run: devbox run test-projects-only
 
+  # Aggregates the sharded `test` matrix into a single status check. Because the
+  # shard matrix produces per-shard job names (e.g.
+  # "test (not-main, ubuntu-latest, project-tests-off, 0)"), branch protection
+  # should require this stable `test-result` check instead of the individual
+  # matrix jobs.
+  test-result:
+    name: test-result
+    if: always()
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check that all test shards passed
+        run: |
+          result="${{ needs.test.result }}"
+          echo "Aggregate result of the test matrix: $result"
+          if [ "$result" != "success" ]; then
+            echo "::error::One or more test shards did not succeed ($result)."
+            exit 1
+          fi
+
   auto-nix-install: # ensure Devbox installs nix and works properly after installation.
     needs: build-devbox
     strategy:
@@ -227,9 +270,9 @@ jobs:
         use-detsys: [true, false]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Download devbox
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: devbox-${{ runner.os }}-${{ runner.arch }}
       - name: Add devbox to path
@@ -276,9 +319,9 @@ jobs:
         nix-version: [2.18.0, 2.19.2, 2.24.7, 2.30.2]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Download devbox
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: devbox-${{ runner.os }}-${{ runner.arch }}
       - name: Add devbox to path
@@ -289,7 +332,12 @@ jobs:
         uses: DeterminateSystems/nix-installer-action@v4
         with:
           logger: pretty
-          extra-conf: experimental-features = ca-derivations fetch-closure
+          # access-tokens is written to the system-wide /etc/nix/nix.conf so both
+          # the Nix client and daemon authenticate to GitHub and avoid the
+          # anonymous API rate limit (HTTP 403) when resolving `github:` flake refs.
+          extra-conf: |
+            experimental-features = ca-derivations fetch-closure
+            access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}
           nix-package-url: https://releases.nixos.org/nix/nix-${{ matrix.nix-version }}/nix-${{ matrix.nix-version }}-${{ runner.arch == 'X64' && 'x86_64' || 'aarch64' }}-${{ runner.os == 'macOS' && 'darwin' || 'linux' }}.tar.xz
       - name: Run devbox install, devbox run, devbox rm
         run: |
